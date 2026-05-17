@@ -1,14 +1,15 @@
 import os
-import json
 import requests
 from flask import Flask, request
 from groq import Groq
 
 app = Flask(__name__)
 
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 PAGE_ACCESS_TOKEN = os.environ.get("PAGE_ACCESS_TOKEN")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
+
+client = Groq(api_key=GROQ_API_KEY)
 
 thong_tin_shop = """
 Bạn là "bé Ô" — trợ lý tư vấn của shop Ô bán TẤT tại Đà Lạt.
@@ -43,13 +44,94 @@ DANH MỤC SẢN PHẨM:
 5. Đồ ngủ sexy
 """
 
+
+@app.route("/", methods=["GET"])
+def home():
+    return "Messenger chatbot bé Ô is running!", 200
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return {
+        "status": "ok",
+        "has_groq_key": bool(GROQ_API_KEY),
+        "has_page_token": bool(PAGE_ACCESS_TOKEN),
+        "has_verify_token": bool(VERIFY_TOKEN)
+    }, 200
+
+
+@app.route("/webhook", methods=["GET"])
+def verify():
+    mode = request.args.get("hub.mode")
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
+
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        print("Webhook verified successfully")
+        return challenge, 200
+
+    print("Webhook verification failed")
+    return "Lỗi xác minh", 403
+
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.get_json()
+
+    print("Webhook received:", data)
+
+    if not data:
+        return "No data", 400
+
+    if data.get("object") == "page":
+        for entry in data.get("entry", []):
+            for event in entry.get("messaging", []):
+                sender_id = event.get("sender", {}).get("id")
+
+                if not sender_id:
+                    continue
+
+                if "message" in event:
+                    message = event["message"]
+
+                    # Bỏ qua echo message để tránh bot tự trả lời chính nó
+                    if message.get("is_echo"):
+                        continue
+
+                    if "text" in message:
+                        tin_nhan = message["text"]
+
+                        try:
+                            tra_loi = hoi_be_o(tin_nhan)
+                        except Exception as e:
+                            print("Groq error:", e)
+                            tra_loi = "Dạ Anh/Chị ơi, bé Ô đang hơi lag xíu 😅 Anh/Chị nhắn Zalo 0968 297 457 giúp bé Ô nha."
+
+                        gui_tin(sender_id, tra_loi)
+
+        return "EVENT_RECEIVED", 200
+
+    return "Not a page event", 404
+
+
 def gui_tin(recipient_id, text):
+    if not PAGE_ACCESS_TOKEN:
+        print("Missing PAGE_ACCESS_TOKEN")
+        return
+
     url = f"https://graph.facebook.com/v18.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+
     data = {
         "recipient": {"id": recipient_id},
         "message": {"text": text}
     }
-    requests.post(url, json=data)
+
+    try:
+        response = requests.post(url, json=data, timeout=10)
+        print("Facebook response:", response.status_code, response.text)
+    except Exception as e:
+        print("Send message error:", e)
+
 
 def hoi_be_o(cau_hoi):
     response = client.chat.completions.create(
@@ -57,28 +139,13 @@ def hoi_be_o(cau_hoi):
         messages=[
             {"role": "system", "content": thong_tin_shop},
             {"role": "user", "content": cau_hoi}
-        ]
+        ],
+        temperature=0.8,
+        max_tokens=500
     )
+
     return response.choices[0].message.content
 
-@app.route("/webhook", methods=["GET"])
-def verify():
-    if request.args.get("hub.verify_token") == VERIFY_TOKEN:
-        return request.args.get("hub.challenge")
-    return "Lỗi xác minh", 403
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.json
-    if data.get("object") == "page":
-        for entry in data["entry"]:
-            for event in entry.get("messaging", []):
-                if "message" in event and "text" in event["message"]:
-                    sender_id = event["sender"]["id"]
-                    tin_nhan = event["message"]["text"]
-                    tra_loi = hoi_be_o(tin_nhan)
-                    gui_tin(sender_id, tra_loi)
-    return "OK", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
